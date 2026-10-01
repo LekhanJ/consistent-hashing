@@ -27,7 +27,8 @@ def seed():
                 port = str(port)
             )
             cursor = conn.cursor()
-            cursor.execute(f"INSERT INTO users (id, name, email) VALUES ({random.randint(1, 100)}, 'Lekhan{random.randint(1, 100)}', 'lekhan{random.randint(1, 100)}@example.com');")
+            for i in range(15):
+                cursor.execute(f"INSERT INTO users (id, name, email) VALUES ({random.randint(1, 100)}, 'Lekhan{random.randint(1, 100)}', 'lekhan{random.randint(1, 100)}@example.com');")
             conn.commit()
         port += 1
       
@@ -50,5 +51,5 @@ def cleanup():
 
 if __name__ == "__main__":
     setup()
-    # seed()
+    seed()
     cleanup()
