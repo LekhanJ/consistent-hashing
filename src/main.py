@@ -3,6 +3,10 @@ import sys
 import psycopg2
 import random
 from docker.models.containers import Container
+from fastapi import FastAPI
+
+
+app = FastAPI()
 
 
 def setup():
