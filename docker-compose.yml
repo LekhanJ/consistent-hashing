@@ -1,11 +1,23 @@
 services:
+  user-db:
+    image: postgres:16
+    container_name: user_db
+    environment:
+      POSTGRES_USER: admin
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: users_db
+    ports:
+      - "5436:5432"
+    volumes:
+      - userdb_data:/var/lib/postgresql/data
+
   shard-0:
     image: postgres:16
     container_name: shard-0
     environment:
       POSTGRES_USER: admin
       POSTGRES_PASSWORD: password
-      POSTGRES_DB: users_db
+      POSTGRES_DB: tasks_db
     ports:
       - "5433:5432"
     volumes:
@@ -17,7 +29,7 @@ services:
     environment:
       POSTGRES_USER: admin
       POSTGRES_PASSWORD: password
-      POSTGRES_DB: users_db
+      POSTGRES_DB: tasks_db
     ports:
       - "5434:5432"
     volumes:
@@ -29,13 +41,14 @@ services:
     environment:
       POSTGRES_USER: admin
       POSTGRES_PASSWORD: password
-      POSTGRES_DB: users_db
+      POSTGRES_DB: tasks_db
     ports:
       - "5435:5432"
     volumes:
       - shard2_data:/var/lib/postgresql/data
 
 volumes:
+  userdb_data:
   shard0_data:
   shard1_data:
   shard2_data:

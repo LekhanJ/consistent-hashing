@@ -4,10 +4,33 @@ import psycopg2
 import random
 from docker.models.containers import Container
 from fastapi import FastAPI
+from pydantic import BaseModel
 
 
 app = FastAPI()
 
+class User(BaseModel):
+    name: str
+
+@app.post("/register")
+def register(user: User):
+    try:
+        conn: psycopg2.connection = psycopg2.connect(
+            host="localhost",
+            database="users_db",
+            user="admin",
+            password="password",
+            port="5436",
+        )
+        
+        cursor: psycopg2.cursor = conn.cursor()
+        cursor.execute(f"INSERT INTO users (name) VALUES {user.name}")
+        conn.commit()
+        
+    except psycopg2.OperationalError as e:
+        print(f"Failed to connect to shard on port 5436: {e}")
+        return None
+    
 
 def setup():
     shards: list[str] = ["shard-0", "shard-1", "shard-2"]
@@ -23,7 +46,6 @@ def setup():
 
 def seed():
     context: docker.DockerClient = docker.from_env()
-    offset: int = 0
     connections: list[psycopg2.connection] = []
     
     for ctr in context.containers.list():
@@ -32,30 +54,38 @@ def seed():
             try:
                 conn: psycopg2.connection = psycopg2.connect(
                     host="localhost",
-                    database="users_db",
+                    database="tasks_db",
                     user="admin",
                     password="password",
                     port=str(port),
                 )
                 
                 cursor: psycopg2.cursor = conn.cursor()
-                start: int = offset * 100 + 1
-                
-                for i in range(5):
-                    cursor.execute(
-                        f"INSERT INTO users (id, name, email) VALUES ({start + i}, 'Lekhan{random.randint(1, 100)}', 'lekhan{random.randint(1, 100)}@example.com');"
-                    )
-                    
+                cursor.execute(f"CREATE TABLE IF NOT EXISTS tasks (id SERIAL PRIMARY KEY, task VARCHAR(250) NOT NULL);")
                 conn.commit()
                 connections.append(conn)
                 
             except psycopg2.OperationalError as e:
                 print(f"Failed to connect to shard on port {port}: {e}")
                 return None
-            
-        offset += 1
-        port += 1
-        
+        if ctr.name.startswith("user"):
+            try:
+                conn: psycopg2.connection = psycopg2.connect(
+                    host="localhost",
+                    database="tasks_db",
+                    user="admin",
+                    password="password",
+                    port=str(port),
+                )
+                
+                cursor: psycopg2.cursor = conn.cursor()
+                cursor.execute(f"CREATE TABLE IF NOT EXISTS users (id SERIAL PRIMARY KEY, name VARCHAR(50) UNIQUE NOT NULL);")
+                conn.commit()
+                        
+            except psycopg2.OperationalError as e:
+                print(f"Failed to connect to shard on port {port}: {e}")
+                return None  
+                      
     return connections
 
 
