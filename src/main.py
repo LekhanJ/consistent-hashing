@@ -11,7 +11,7 @@ app = FastAPI()
 
 SHARD_PORTS: dict[str, int] = {"shard-0": 5433, "shard-1": 5434, "shard-2": 5435}
 USERS_PORT: int = 5436
-REPLICAS: int = 100
+REPLICAS: int = 1
 
 users_conn: psycopg2.connection = None
 shard_conns: dict[str, psycopg2.connection] = {}    
@@ -145,12 +145,6 @@ def cleanup():
         port += 1
 
 
-class Node:
-    def __init__(self, conn: psycopg2.connection, start: int):
-        self.conn = conn
-        self.start = start
-
-
 if __name__ == "__main__":
     # try:
     #     setup()
@@ -174,7 +168,7 @@ if __name__ == "__main__":
                         password="password",
                         port=5434,
                     )
-    shard_conns = {
-        "shard-1": conn
-    }
-    print(build_ring())
+    shard_conns["shard-1"] = conn
+    r = build_ring()
+    for x in r:
+        print(x.position)
