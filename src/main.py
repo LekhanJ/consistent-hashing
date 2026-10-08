@@ -1,3 +1,5 @@
+from http.client import HTTPException
+
 import docker
 import sys
 import psycopg2
@@ -5,13 +7,13 @@ from docker.models.containers import Container
 from fastapi import FastAPI
 from pydantic import BaseModel
 import hashlib
-
+import uvicorn
 
 app = FastAPI()
 
 SHARD_PORTS: dict[str, int] = {"shard-0": 5433, "shard-1": 5434, "shard-2": 5435}
 USERS_PORT: int = 5436
-REPLICAS: int = 1
+REPLICAS: int = 10
 
 users_conn: psycopg2.connection = None
 shard_conns: dict[str, psycopg2.connection] = {}    
@@ -44,131 +46,151 @@ def build_ring() -> list[Node]:
     
     ring.sort(key=lambda node: node.position)
     return ring
+
+def find_node(key: str) -> Node:
+    key_hash = hash_key(key)
+ 
+    for node in nodes:
+        if node.position >= key_hash:
+            return node
+ 
+    return nodes[0] 
+
+def get_user_id(name: str) -> int:
+    cursor = users_conn.cursor()
+    cursor.execute("SELECT id FROM users WHERE name = %s", (name,))
+    row = cursor.fetchone()
+    users_conn.commit()
+ 
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"User '{name}' not found")
     
+    return row[0]   
 
 @app.post("/register")
 def register(user: User):
     try:
-        conn: psycopg2.connection = psycopg2.connect(
-            host="localhost",
-            database="users_db",
-            user="admin",
-            password="password",
-            port="5436",
+        cursor = users_conn.cursor()
+        cursor.execute(
+            "INSERT INTO users (name) VALUES (%s) RETURNING id", (user.name,)
         )
-        
-        cursor: psycopg2.cursor = conn.cursor()
-        cursor.execute(f"INSERT INTO users (name) VALUES {user.name}")
+        user_id = cursor.fetchone()[0]
+        users_conn.commit()
+    except psycopg2.errors.UniqueViolation:
+        users_conn.rollback()
+        raise HTTPException(status_code=409, detail="User already exists")
+ 
+    node = find_node(str(user_id))
+    return {"id": user_id, "name": user.name, "shard": node.shard_name}
+
+@app.post("/tasks")
+def create_task(body: Task):
+    user_id = get_user_id(body.user)
+    node = find_node(str(user_id)) 
+ 
+    cursor = node.conn.cursor()
+    cursor.execute(
+        "INSERT INTO tasks (user_id, task) VALUES (%s, %s) RETURNING id",
+        (user_id, body.task),
+    )
+    task_id = cursor.fetchone()[0]
+    node.conn.commit()
+ 
+    return {"task_id": task_id, "user": body.user, "shard": node.shard_name}    
+
+@app.get("/tasks/{user}")
+def list_tasks(user: str):
+    user_id = get_user_id(user)
+    node = find_node(str(user_id))
+ 
+    cursor = node.conn.cursor()
+    cursor.execute("SELECT id, task FROM tasks WHERE user_id = %s", (user_id,))
+    rows = cursor.fetchall()
+    node.conn.commit()
+ 
+    return {"user": user, "shard": node.shard_name, "tasks": rows}
+
+@app.get("/stats")
+def stats():
+    result = {}
+    for shard_name, conn in shard_conns.items():
+        cursor = conn.cursor()
+        cursor.execute("SELECT user_id, COUNT(*) FROM tasks GROUP BY user_id")
+        result[shard_name] = {str(uid): count for uid, count in cursor.fetchall()}
         conn.commit()
-        
-    except psycopg2.OperationalError as e:
-        print(f"Failed to connect to shard on port 5436: {e}")
-        return None
-    
+    return result
 
 def setup():
-    shards: list[str] = ["shard-0", "shard-1", "shard-2"]
-    context: docker.DockerClient = docker.from_env()
-    for shard in shards:
+    names = ["user_db"] + list(SHARD_PORTS.keys())
+    context = docker.from_env()
+    for name in names:
         try:
-            container: Container = context.containers.get(shard)
-            if not container.attrs["State"]["Status"] == "running":
-                raise docker.errors.NotFound
+            container = context.containers.get(name)
+            if container.attrs["State"]["Status"] != "running":
+                raise docker.errors.NotFound(f"{name} is not running")
         except docker.errors.NotFound:
+            print(f"Container {name} is not running. Run: docker compose up -d")
             sys.exit(1)
 
 
 def seed():
-    context: docker.DockerClient = docker.from_env()
-    connections: list[psycopg2.connection] = []
-    
-    for ctr in context.containers.list():
-        port: int = 5433
-        if ctr.name.startswith("shard"):
-            try:
-                conn: psycopg2.connection = psycopg2.connect(
-                    host="localhost",
-                    database="tasks_db",
-                    user="admin",
-                    password="password",
-                    port=str(port),
-                )
-                
-                cursor: psycopg2.cursor = conn.cursor()
-                cursor.execute(f"CREATE TABLE IF NOT EXISTS tasks (id SERIAL PRIMARY KEY, task VARCHAR(250) NOT NULL);")
-                conn.commit()
-                connections.append(conn)
-                
-            except psycopg2.OperationalError as e:
-                print(f"Failed to connect to shard on port {port}: {e}")
-                return None
-        if ctr.name.startswith("user"):
-            try:
-                conn: psycopg2.connection = psycopg2.connect(
-                    host="localhost",
-                    database="tasks_db",
-                    user="admin",
-                    password="password",
-                    port=str(port),
-                )
-                
-                cursor: psycopg2.cursor = conn.cursor()
-                cursor.execute(f"CREATE TABLE IF NOT EXISTS users (id SERIAL PRIMARY KEY, name VARCHAR(50) UNIQUE NOT NULL);")
-                conn.commit()
-                        
-            except psycopg2.OperationalError as e:
-                print(f"Failed to connect to shard on port {port}: {e}")
-                return None  
-                      
-    return connections
+    users = psycopg2.connect(
+        host="localhost",
+        database="users_db",
+        user="admin",
+        password="password",
+        port=USERS_PORT,
+    )
+    cursor = users.cursor()
+    cursor.execute(
+        "CREATE TABLE IF NOT EXISTS users "
+        "(id SERIAL PRIMARY KEY, name VARCHAR(50) UNIQUE NOT NULL);"
+    )
+    users.commit()
+
+    shards = {}
+    for shard_name, port in SHARD_PORTS.items():
+        conn = psycopg2.connect(
+            host="localhost",
+            database="tasks_db",
+            user="admin",
+            password="password",
+            port=port,
+        )
+        cursor = conn.cursor()
+        cursor.execute(
+            "CREATE TABLE IF NOT EXISTS tasks "
+            "(id SERIAL PRIMARY KEY, user_id INT NOT NULL, task VARCHAR(250) NOT NULL);"
+        )
+        conn.commit()
+        shards[shard_name] = conn
+ 
+    return users, shards
 
 
 def cleanup():
-    context: docker.DockerClient = docker.from_env()
-    
-    for ctr in context.containers.list():
-        port: int = 5433
-        
-        if ctr.name.startswith("shard"):
-            conn: psycopg2.connection = psycopg2.connect(
-                host="localhost",
-                database="users_db",
-                user="admin",
-                password="password",
-                port=str(port),
-            )
-            
-            cursor: psycopg2.cursor = conn.cursor()
-            cursor.execute(f"DELETE FROM users;")
-            conn.commit()
-            
-        port += 1
+    if users_conn is not None:
+        cursor = users_conn.cursor()
+        cursor.execute("TRUNCATE users RESTART IDENTITY;")
+        users_conn.commit()
+        users_conn.close()
+ 
+    for conn in shard_conns.values():
+        cursor = conn.cursor()
+        cursor.execute("TRUNCATE tasks RESTART IDENTITY;")
+        conn.commit()
+        conn.close()
 
 
 if __name__ == "__main__":
-    # try:
-    #     setup()
-    #     connections: list[psycopg2.connection] = seed()
-
-    #     nodes: list[Node] = []
-        
-    #     for i, conn in enumerate(connections):
-    #         nodes.append(Node(conn, i * 100 + 1))
-        
-        
-        
-    # except Exception as e:
-    #     print(f"Error occurred: {e}")
-    # finally:
-    #     cleanup()
-    conn: psycopg2.connection = psycopg2.connect(
-                        host="localhost",
-                        database="tasks_db",
-                        user="admin",
-                        password="password",
-                        port=5434,
-                    )
-    shard_conns["shard-1"] = conn
-    r = build_ring()
-    for x in r:
-        print(x.position)
+    try:
+        setup()
+        users_conn, shard_conns = seed()
+        nodes = build_ring()
+ 
+        uvicorn.run(app, host="127.0.0.1", port=8000)
+ 
+    except Exception as e:
+        print(f"Error occurred: {e}")
+    finally:
+        cleanup()
